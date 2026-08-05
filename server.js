@@ -101,15 +101,11 @@ app.post('/api/esp-sync', (req, res) => {
                 device.data = {
                     type: type,
                     d1: req.body.d1, d2: req.body.d2,
-                    d3: req.body.d3, d4: req.body.d4
+                    d3: req.body.d3, d4: req.body.d4,
+                    volume: req.body.volume,
+                    level: req.body.level
                 };
             }
-        } else if (type === "MULTIDATA") {
-            device.data = {
-                type: type,
-                volume: req.body.volume,
-                level: req.body.level
-            };
         } else {
             device.data = {
                 type: type,
