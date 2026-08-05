@@ -15,7 +15,7 @@ function getOrCreateDevice(deviceId) {
             secretKey: "", // Lưu mã PIN từ ESP gửi lên
             data: {
                 type: "NONE",
-                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", volume: "N/A", level: "N/A",                
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A",                
                 tag: "", value: ""
             },
             commands: {
@@ -101,7 +101,7 @@ app.post('/api/esp-sync', (req, res) => {
                     type: type,
                     d1: req.body.d1, d2: req.body.d2,
                     d3: req.body.d3, d4: req.body.d4,
-                    volume: req.body.volume, level: req.body.level                    
+                    d5: req.body.d5, d6: req.body.d6                    
                 };
             }
         } else {
