@@ -89,21 +89,23 @@ app.post('/api/esp-sync', (req, res) => {
 
     const device = getOrCreateDevice(device_id);
     
-    // Cập nhật PIN và thời gian chạy
+    // Cập nhật PIN và thời gian hoạt động
     device.secretKey = secret_key;
     device.lastSeen = Date.now();
 
     // Lưu dữ liệu cảm biến
     if (type) {
         if (type === "MULTI") {
-            if (req.body.d1 && !req.body.d1.includes(':')) {
-                device.data = {
-                    type: type,
-                    d1: req.body.d1, d2: req.body.d2,
-                    d3: req.body.d3, d4: req.body.d4,
-                    d5: req.body.d5, d6: req.body.d6                    
-                };
-            }
+            // Đã loại bỏ bớt kiểm tra d1.includes(':') để đảm bảo luôn ghi nhận dữ liệu
+            device.data = {
+                type: type,
+                d1: req.body.d1 || "N/A",
+                d2: req.body.d2 || "N/A",
+                d3: req.body.d3 || "N/A",
+                d4: req.body.d4 || "N/A",
+                d5: req.body.d5 || "N/A",
+                d6: req.body.d6 || "N/A"
+            };
         } else {
             device.data = {
                 type: type,
@@ -113,10 +115,10 @@ app.post('/api/esp-sync', (req, res) => {
         }
     }
 
-    // Phản hồi các lệnh đang chờ của riêng thiết bị này
+    // Phản hồi các lệnh đang chờ
     res.json(device.commands);
 
-    // Reset các cờ lệnh sau khi gửi
+    // Reset các cờ lệnh sau khi gửi thành công
     for (let key in device.commands) {
         device.commands[key] = 0;
     }
