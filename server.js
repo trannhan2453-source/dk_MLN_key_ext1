@@ -16,6 +16,7 @@ function getOrCreateDevice(deviceId) {
             data: {
                 type: "NONE",
                 d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A",
+                volume: "N/A", level: "N/A",
                 tag: "", value: ""
             },
             commands: {
@@ -103,6 +104,12 @@ app.post('/api/esp-sync', (req, res) => {
                     d3: req.body.d3, d4: req.body.d4
                 };
             }
+        } else if (type === "MULTIDATA") {
+            device.data = {
+                type: type,
+                volume: req.body.volume,
+                level: req.body.level
+            };
         } else {
             device.data = {
                 type: type,
