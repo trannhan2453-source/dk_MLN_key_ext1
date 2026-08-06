@@ -8,7 +8,6 @@ app.use(express.urlencoded({ extended: true }));
 
 // ==========================================================
 // 1. DANH SÁCH THIẾT BỊ ĐƯỢC PHÉP HOẠT ĐỘNG (WHITELIST)
-// Khai báo sẵn các ID và KEY hợp lệ tại đây (hoặc lấy từ DB)
 // ==========================================================
 const ALLOWED_DEVICES = {
     "ML1": "123456",
@@ -16,13 +15,13 @@ const ALLOWED_DEVICES = {
     "ML3": "456"
 };
 
-// Thời gian tối đa (milisecond) không có tín hiệu thì tính là Offline (ví dụ: 30 giây)
+// Thời gian tối đa (milisecond) không có tín hiệu thì tính là Offline (30 giây)
 const ONLINE_TIMEOUT = 30000; 
 
 // Lưu trữ dữ liệu RUNTIME của các thiết bị đang hoạt động
 const devices = {};
 
-// Hàm hỗ trợ kiểm tra thiết bị có đang Online hay không
+// Hàm kiểm tra thiết bị có đang Online hay không
 function isOnline(deviceId) {
     if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
     return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
@@ -54,8 +53,7 @@ function getOrCreateDevice(deviceId) {
 // --- API DÀNH CHO APP INVENTOR ---
 // ==========================================
 
-// 0. API RIÊNG CHO APP CHECK TỒN TẠI & TRẠNG THÁI ONLINE
-// App gửi JSON body hoặc Query: { "device_id": "MAY_LOC_01", "secret_key": "123456" }
+// 0. API CHECK TỒN TẠI & TRẠNG THÁI ONLINE
 app.post('/api/check-device', (req, res) => {
     const { device_id, secret_key } = req.body;
 
@@ -63,7 +61,6 @@ app.post('/api/check-device', (req, res) => {
         return res.status(400).json({ status: "ERROR", message: "Thiếu device_id hoặc secret_key" });
     }
 
-    // 1. Kiểm tra ID có trong danh sách cho phép không
     if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) {
         return res.json({ 
             status: "ERROR", 
@@ -73,7 +70,6 @@ app.post('/api/check-device', (req, res) => {
         });
     }
 
-    // 2. Kiểm tra Key có đúng không
     if (ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.json({ 
             status: "ERROR", 
@@ -84,7 +80,6 @@ app.post('/api/check-device', (req, res) => {
         });
     }
 
-    // 3. Kiểm tra Trạng thái Online
     const onlineStatus = isOnline(device_id);
 
     return res.json({
@@ -96,7 +91,7 @@ app.post('/api/check-device', (req, res) => {
     });
 });
 
-// 1. App lấy dữ liệu hiển thị (?device_id=MAY_LOC_01&secret_key=123456)
+// 1. APP LẤY DỮ LIỆU HIỂN THỊ (ĐÃ SỬA: OFFLINE TỰ ĐỔI D1->D6 THÀNH N/A)
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
 
@@ -109,13 +104,31 @@ app.get('/api/getdata', (req, res) => {
     }
 
     const device = getOrCreateDevice(device_id);
+    const onlineStatus = isOnline(device_id);
+
+    // Chuẩn bị dữ liệu phản hồi
+    let responseData = { ...device.data };
+
+    // Nếu thiết bị đang Offline -> Đè các giá trị d1..d6 thành "N/A"
+    if (!onlineStatus) {
+        responseData = {
+            ...responseData,
+            d1: "N/A",
+            d2: "N/A",
+            d3: "N/A",
+            d4: "N/A",
+            d5: "N/A",
+            d6: "N/A"
+        };
+    }
+
     res.json({
-        ...device.data,
-        online: isOnline(device_id) // Trả thêm cờ online cho App
+        ...responseData,
+        online: onlineStatus
     });
 });
 
-// 2. App gửi lệnh điều khiển (body: device_id, secret_key, cmd)
+// 2. App gửi lệnh điều khiển
 app.post('/api/control', (req, res) => {
     const { device_id, secret_key, cmd } = req.body;
 
@@ -148,24 +161,20 @@ app.post('/api/esp-sync', (req, res) => {
         return res.status(400).json({ status: "ERROR", message: "Thiếu device_id hoặc secret_key từ ESP" });
     }
 
-    // --- KIỂM TRA WHITELIST ---
-    // 1. Nếu ID không có trong ALLOWED_DEVICES -> Từ chối kết nối
     if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) {
         return res.status(403).json({ status: "ERROR", message: "ID thiết bị này chưa được cấp phép trên Server!" });
     }
 
-    // 2. Nếu KEY không khớp -> Từ chối
     if (ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(401).json({ status: "ERROR", message: "Mã Secret Key của ESP không đúng!" });
     }
 
-    // Nếu hợp lệ thì khởi tạo / lấy dữ liệu runtime
     const device = getOrCreateDevice(device_id);
     
-    // Cập nhật timestamp hoạt động mới nhất
+    // Cập nhật thời điểm hoạt động mới nhất của ESP
     device.lastSeen = Date.now();
 
-    // Lưu dữ liệu cảm biến gửi lên từ ESP
+    // Lưu dữ liệu từ ESP
     if (type) {
         if (type === "MULTI") {
             if (req.body.d1 && !req.body.d1.includes(':')) {
@@ -185,10 +194,10 @@ app.post('/api/esp-sync', (req, res) => {
         }
     }
 
-    // Phản hồi các lệnh đang chờ của riêng thiết bị này cho ESP8266
+    // Phản hồi các lệnh đang chờ cho ESP
     res.json(device.commands);
 
-    // Reset các cờ lệnh sau khi gửi cho ESP
+    // Reset các cờ lệnh sau khi gửi
     for (let key in device.commands) {
         device.commands[key] = 0;
     }
