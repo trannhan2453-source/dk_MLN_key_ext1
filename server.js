@@ -11,9 +11,9 @@ app.use(express.urlencoded({ extended: true }));
 // Khai báo sẵn các ID và KEY hợp lệ tại đây (hoặc lấy từ DB)
 // ==========================================================
 const ALLOWED_DEVICES = {
-    "MAY_LOC_01": "123456",
-    "MAY_LOC_02": "654321",
-    "MAY_LOC_03": "888888"
+    "ML1": "123456",
+    "ML2": "123",
+    "ML3": "456"
 };
 
 // Thời gian tối đa (milisecond) không có tín hiệu thì tính là Offline (ví dụ: 30 giây)
