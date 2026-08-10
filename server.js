@@ -114,7 +114,9 @@ function sendNextChunk(ws) {
 
 // API Nạp Firmware từ App Inventor
 app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
-    const { device_id, secret_key } = req.body;
+    // Lấy device_id và secret_key từ Query String (App) hoặc Body (Form)
+    const device_id = req.query.device_id || req.body.device_id;
+    const secret_key = req.query.secret_key || req.body.secret_key;
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại" });
@@ -134,7 +136,6 @@ app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
         return res.status(500).json({ status: "ERROR", message: "ESP8266 hiện đang Offline!" });
     }
 
-    // Chuẩn bị luồng truyền dữ liệu WebSocket sang ESP8266
     const filePath = req.file.path;
     const stats = fs.statSync(filePath);
     const totalSize = stats.size;
@@ -149,12 +150,12 @@ app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
 
     updateProgress[device_id] = { status: "DOWNLOADING", percent: 0 };
 
-    // Bước 1: Gửi lệnh bắt đầu truyền file kèm tổng dung lượng
+    // Gửi lệnh cho ESP8266 bắt đầu tải file
     ws.send(`START_UPDATE:${totalSize}`);
 
     return res.json({
         status: "OK",
-        message: "File đã được nhận, đang tiến hành truyền xuống ESP8266 và nạp vào ATmega2560!"
+        message: "File đã được gửi lên Server thành công! Đang tiến hành nạp xuống ESP8266..."
     });
 });
 
