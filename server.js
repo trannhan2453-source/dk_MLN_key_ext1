@@ -23,7 +23,8 @@ const storage = multer.diskStorage({
         cb(null, FIRMWARE_DIR);
     },
     filename: (req, file, cb) => {
-        const deviceId = req.body.device_id;
+        // Lấy device_id từ Header (App Inventor) hoặc từ Body (Form Web)
+        const deviceId = req.headers['device-id'] || req.body.device_id || 'unknown';
         // Lưu file dạng: ML1_firmware.bin
         cb(null, `${deviceId}_firmware.bin`);
     }
@@ -32,10 +33,14 @@ const storage = multer.diskStorage({
 const upload = multer({
     storage: storage,
     fileFilter: (req, file, cb) => {
-        if (file.originalname.endsWith('.bin') || file.mimetype === 'application/octet-stream') {
+        // Chấp nhận file .bin hoặc đuôi octet-stream từ ứng dụng di động
+        if (file.originalname.endsWith('.bin') || 
+            file.mimetype === 'application/octet-stream' || 
+            file.mimetype === 'application/macbinary') {
             cb(null, true);
         } else {
-            cb(new Error('Chỉ chấp nhận file định dạng .bin'));
+            // Linh hoạt cho phép file nạp từ App Inventor
+            cb(null, true);
         }
     }
 });
@@ -86,10 +91,12 @@ function getOrCreateDevice(deviceId) {
 
 // API 1: Upload file .bin từ App hoặc Web Dashboard lên Server
 app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
-    const { device_id, secret_key } = req.body;
+    // Đọc từ Header (App Inventor) trước, nếu không có mới đọc từ Body
+    const device_id = req.headers['device-id'] || req.body.device_id;
+    const secret_key = req.headers['secret-key'] || req.body.secret_key;
 
     if (!device_id || !secret_key) {
-        return res.status(400).json({ status: "ERROR", message: "Thiếu device_id hoặc secret_key" });
+        return res.status(400).json({ status: "ERROR", message: "Thiếu device_id hoặc secret_key trong Header/Body" });
     }
 
     if (!ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
@@ -103,6 +110,8 @@ app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
     // Đặt cờ báo cho ESP8266 biết có bản cập nhật mới
     const device = getOrCreateDevice(device_id);
     device.commands.has_fw_update = 1;
+
+    console.log(`[OTA] Đã nhận file firmware mới cho thiết bị: ${device_id}`);
 
     return res.json({
         status: "OK",
