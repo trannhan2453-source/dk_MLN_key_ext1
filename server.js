@@ -66,8 +66,10 @@ function getOrCreateDevice(deviceId) {
 // ==========================================
 
 // API Nạp Firmware từ App Inventor (File .bin)
-app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
-    const { device_id, secret_key } = req.body;
+// Thêm middleware express.raw để đọc dữ liệu file binary trực tiếp từ Web4.PostFile
+app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '10mb' }), (req, res) => {
+    // 1. Lấy thông tin từ URL (Query parameters: ?device_id=...&secret_key=...)
+    const { device_id, secret_key } = req.query;
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
@@ -77,16 +79,28 @@ app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
         return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
     }
 
-    if (!req.file) {
-        return res.status(400).json({ status: "ERROR", message: "Không tìm thấy file .bin!" });
+    // 2. Kiểm tra dữ liệu file gửi lên
+    if (!req.body || req.body.length === 0) {
+        return res.status(400).json({ status: "ERROR", message: "Không nhận được dữ liệu file .bin!" });
     }
 
-    const device = getOrCreateDevice(device_id);
-    device.commands.co_update = 1; // Bật cờ thông báo cho ESP8266 biết có file mới
+    // 3. Ghi dữ liệu file binary vào thư mục uploads
+    const filePath = path.join(uploadsDir, `${device_id}.bin`);
+    fs.writeFile(filePath, req.body, (err) => {
+        if (err) {
+            console.error("Lỗi lưu file:", err);
+            return res.status(500).json({ status: "ERROR", message: "Không thể lưu file trên Server!" });
+        }
 
-    return res.json({ 
-        status: "OK", 
-        message: "Upload file thành công! Đã gửi lệnh nạp tới thiết bị." 
+        // 4. Bật cờ nạp OTA cho thiết bị
+        const device = getOrCreateDevice(device_id);
+        device.commands.co_update = 1;
+
+        console.log(`[OTA] Đã nhận file .bin mới cho thiết bị: ${device_id}`);
+        return res.json({ 
+            status: "OK", 
+            message: "Upload thành công! Đã gửi lệnh nạp tới thiết bị." 
+        });
     });
 });
 
