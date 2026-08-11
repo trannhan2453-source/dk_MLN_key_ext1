@@ -66,10 +66,12 @@ function getOrCreateDevice(deviceId) {
 // ==========================================
 
 // API Nạp Firmware từ App Inventor (File .bin)
-// Thêm middleware express.raw để đọc dữ liệu file binary trực tiếp từ Web4.PostFile
-app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '10mb' }), (req, res) => {
-    // 1. Lấy thông tin từ URL (Query parameters: ?device_id=...&secret_key=...)
+// Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
+app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
+    // Lấy tham số từ Query string: ?device_id=ML1&secret_key=123456
     const { device_id, secret_key } = req.query;
+
+    console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
@@ -79,27 +81,26 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '10mb' }), (r
         return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
     }
 
-    // 2. Kiểm tra dữ liệu file gửi lên
     if (!req.body || req.body.length === 0) {
-        return res.status(400).json({ status: "ERROR", message: "Không nhận được dữ liệu file .bin!" });
+        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
     }
 
-    // 3. Ghi dữ liệu file binary vào thư mục uploads
+    // Lưu file vào thư mục uploads
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
     fs.writeFile(filePath, req.body, (err) => {
         if (err) {
-            console.error("Lỗi lưu file:", err);
-            return res.status(500).json({ status: "ERROR", message: "Không thể lưu file trên Server!" });
+            console.error("Lỗi ghi file:", err);
+            return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
-        // 4. Bật cờ nạp OTA cho thiết bị
+        // Bật cờ nạp OTA
         const device = getOrCreateDevice(device_id);
         device.commands.co_update = 1;
 
-        console.log(`[OTA] Đã nhận file .bin mới cho thiết bị: ${device_id}`);
-        return res.json({ 
+        console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
+        return res.status(200).json({ 
             status: "OK", 
-            message: "Upload thành công! Đã gửi lệnh nạp tới thiết bị." 
+            message: "Đã tải file thành công lên Server!" 
         });
     });
 });
