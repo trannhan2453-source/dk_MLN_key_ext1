@@ -1,121 +1,180 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
+const cors = require('cors');
 const multer = require('multer');
+const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/ws' });
-
+app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const upload = multer({ dest: 'uploads/' });
+// Cấu hình thư mục lưu trữ file .bin
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir);
+}
 
-// Lưu danh sách thiết bị và tiến trình nạp
-const devices = {}; // { device_id: { ws, data, flashProgress, avrProgress } }
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+        const deviceId = req.body.device_id || 'unknown';
+        cb(null, `${deviceId}.bin`);
+    }
+});
+const upload = multer({ storage: storage });
 
-// 1. API GIỮ NGUYÊN CHO ESP8266 HTTP SYNC CỦA BẠN
+const ALLOWED_DEVICES = {
+    "ML1": "123456",
+    "ML2": "123",
+    "ML3": "456"
+};
+
+const ONLINE_TIMEOUT = 30000; 
+const devices = {};
+
+function isOnline(deviceId) {
+    if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
+    return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
+}
+
+function getOrCreateDevice(deviceId) {
+    if (!devices[deviceId]) {
+        devices[deviceId] = {
+            secretKey: ALLOWED_DEVICES[deviceId] || "",
+            data: {
+                type: "NONE",
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A",        
+                tag: "", value: ""
+            },
+            commands: {
+                co_kiem: 0,
+                co_axit: 0,
+                co_tinhkhiet: 0,
+                co_onoff: 0,
+                co_volume: 0,
+                co_update: 0 // Cờ báo nạp code
+            },
+            lastSeen: 0
+        };
+    }
+    return devices[deviceId];
+}
+
+// ==========================================
+// --- API DÀNH CHO APP INVENTOR ---
+// ==========================================
+
+// API Nạp Firmware từ App Inventor (File .bin)
+app.post('/api/upload-firmware', upload.single('firmware'), (req, res) => {
+    const { device_id, secret_key } = req.body;
+
+    if (!device_id || !ALLOWED_DEVICES[device_id]) {
+        return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
+    }
+
+    if (!secret_key || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
+    }
+
+    if (!req.file) {
+        return res.status(400).json({ status: "ERROR", message: "Không tìm thấy file .bin!" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+    device.commands.co_update = 1; // Bật cờ thông báo cho ESP8266 biết có file mới
+
+    return res.json({ 
+        status: "OK", 
+        message: "Upload file thành công! Đã gửi lệnh nạp tới thiết bị." 
+    });
+});
+
+app.post('/api/check-device', (req, res) => {
+    const { device_id, secret_key } = req.body;
+    if (!device_id || !secret_key) return res.status(400).json({ status: "ERROR", message: "Thiếu thông tin" });
+    if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) return res.json({ status: "ERROR", exists: false, online: false });
+    if (ALLOWED_DEVICES[device_id] !== secret_key) return res.json({ status: "ERROR", exists: true, validKey: false });
+    
+    const onlineStatus = isOnline(device_id);
+    return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
+});
+
+app.get('/api/getdata', (req, res) => {
+    const { device_id, secret_key } = req.query;
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+    const device = getOrCreateDevice(device_id);
+    res.json({ ...device.data, online: isOnline(device_id) });
+});
+
+app.post('/api/control', (req, res) => {
+    const { device_id, secret_key, cmd } = req.body;
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+    const device = getOrCreateDevice(device_id);
+    if (cmd && device.commands.hasOwnProperty(`co_${cmd}`)) {
+        device.commands[`co_${cmd}`] = 1;
+        return res.json({ status: "OK", message: `Đã ghi nhận lệnh ${cmd}` });
+    }
+    res.status(400).json({ status: "ERROR", message: "Lệnh không hợp lệ" });
+});
+
+// ==========================================
+// --- API DÀNH CHO ESP8266 ---
+// ==========================================
+
+// Endpoint cho ESP8266 tải file .bin
+app.get('/api/download-firmware/:device_id', (req, res) => {
+    const { device_id } = req.params;
+    const filePath = path.join(uploadsDir, `${device_id}.bin`);
+
+    if (fs.existsSync(filePath)) {
+        res.download(filePath);
+    } else {
+        res.status(404).json({ status: "ERROR", message: "File firmware không tồn tại" });
+    }
+});
+
 app.post('/api/esp-sync', (req, res) => {
-  const { device_id, type, d1, d2, d3, d4, d5, d6, tag, value } = req.body;
+    const { device_id, secret_key, type } = req.body;
 
-  if (!devices[device_id]) {
-    devices[device_id] = { flashProgress: 0, avrProgress: 0 };
-  }
-  devices[device_id].lastSeen = Date.now();
-  devices[device_id].data = req.body;
-
-  // Phản hồi mẫu lại cho ESP8266 (Bạn điều chỉnh theo logic database thực tế của bạn)
-  res.json({
-    status: 'ok',
-    co_kiem: 0,
-    co_axit: 0,
-    co_tinhkhiet: 0,
-    co_onoff: 0,
-    co_volume: 0
-  });
-});
-
-// 2. API LẤY DANH SÁCH THIẾT BỊ CHO APP
-app.get('/api/devices', (req, res) => {
-  const result = Object.keys(devices).map(id => ({
-    id: id,
-    online: (Date.now() - (devices[id].lastSeen || 0)) < 10000,
-    flashProgress: devices[id].flashProgress || 0,
-    avrProgress: devices[id].avrProgress || 0,
-    data: devices[id].data || {}
-  }));
-  res.json({ devices: result });
-});
-
-// 3. API NHẬN FILE .BIN TỪ APP VÀ NẠP OTA DOWN ESP8266
-app.post('/upload', upload.single('binFile'), (req, res) => {
-  const file = req.file;
-  let targetDevices = req.body.targetDevices;
-
-  if (!file) return res.status(400).json({ error: 'Chưa chọn file .bin!' });
-
-  if (typeof targetDevices === 'string') {
-    try { targetDevices = JSON.parse(targetDevices); } catch (e) {}
-  }
-
-  if (!Array.isArray(targetDevices)) targetDevices = [targetDevices];
-
-  const fileBuffer = fs.readFileSync(file.path);
-
-  targetDevices.forEach(devId => {
-    const dev = devices[devId];
-    if (dev && dev.ws && dev.ws.readyState === WebSocket.OPEN) {
-      dev.flashProgress = 0;
-      dev.avrProgress = 0;
-
-      // Bước 1: Gửi lệnh bắt đầu nhận file
-      dev.ws.send('START_FLASH_FLASH');
-
-      // Bước 2: Chia nhỏ file thành các gói 1024 bytes và gửi
-      const CHUNK_SIZE = 1024;
-      for (let offset = 0; offset < fileBuffer.length; offset += CHUNK_SIZE) {
-        const chunk = fileBuffer.slice(offset, offset + CHUNK_SIZE);
-        dev.ws.send(chunk);
-      }
-
-      // Bước 3: Báo hoàn tất truyền file
-      dev.ws.send('END_FLASH_FLASH');
+    if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id) || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(401).json({ status: "ERROR", message: "Xác thực không hợp lệ" });
     }
-  });
 
-  fs.unlinkSync(file.path); // Xóa file tạm trên Server
-  res.json({ message: 'Đã kích hoạt tiến trình nạp OTA thành công!' });
-});
+    const device = getOrCreateDevice(device_id);
+    device.lastSeen = Date.now();
 
-// 4. QUẢN LÝ KẾT NỐI WEBSOCKET TỪ ESP8266
-wss.on('connection', (ws) => {
-  let currentDeviceId = null;
-
-  ws.on('message', (message) => {
-    const msgStr = message.toString();
-
-    if (msgStr.startsWith('REGISTER_DEVICE:')) {
-      currentDeviceId = msgStr.split(':')[1];
-      if (!devices[currentDeviceId]) devices[currentDeviceId] = {};
-      devices[currentDeviceId].ws = ws;
-      console.log(`[WS] Thiết bị kết nối thành công: ${currentDeviceId}`);
-    } else if (msgStr.startsWith('PROGRESS_AVR:')) {
-      const val = msgStr.split(':')[1];
-      if (devices[currentDeviceId]) {
-        devices[currentDeviceId].avrProgress = parseInt(val) || 100;
-      }
+    if (type) {
+        if (type === "MULTI") {
+            if (req.body.d1 && !req.body.d1.includes(':')) {
+                device.data = {
+                    type: type,
+                    d1: req.body.d1, d2: req.body.d2,
+                    d3: req.body.d3, d4: req.body.d4,
+                    d5: req.body.d5, d6: req.body.d6
+                };
+            }
+        } else {
+            device.data = {
+                type: type,
+                tag: req.body.tag || "",
+                value: req.body.value || ""
+            };
+        }
     }
-  });
 
-  ws.on('close', () => {
-    if (currentDeviceId && devices[currentDeviceId]) {
-      devices[currentDeviceId].ws = null;
+    // Trả lệnh về cho ESP
+    res.json(device.commands);
+
+    // Reset cờ lệnh sau khi gửi
+    for (let key in device.commands) {
+        device.commands[key] = 0;
     }
-  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server đang chạy tại cổng ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
