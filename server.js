@@ -55,12 +55,6 @@ function getOrCreateDevice(deviceId) {
                 co_volume: 0,
                 co_update: 0 // Cờ báo nạp code
             },
-            // Khởi tạo đối tượng theo dõi tiến độ OTA
-            otaProgress: {
-                progress: 0,
-                status: "IDLE", // IDLE, DOWNLOADING, ERASING_CHIP, FLASHING, SUCCESS, ERROR
-                lastUpdated: 0
-            },
             lastSeen: 0
         };
     }
@@ -72,7 +66,9 @@ function getOrCreateDevice(deviceId) {
 // ==========================================
 
 // API Nạp Firmware từ App Inventor (File .bin)
+// Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
+    // Lấy tham số từ Query string: ?device_id=ML1&secret_key=123456
     const { device_id, secret_key } = req.query;
 
     console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
@@ -97,38 +93,15 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
             return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
-        // Bật cờ nạp OTA và Reset trạng thái tiến độ
+        // Bật cờ nạp OTA
         const device = getOrCreateDevice(device_id);
         device.commands.co_update = 1;
-        device.otaProgress = {
-            progress: 0,
-            status: "STARTING",
-            lastUpdated: Date.now()
-        };
 
         console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
         return res.status(200).json({ 
             status: "OK", 
             message: "Đã tải file thành công lên Server!" 
         });
-    });
-});
-
-// API Cho App Inventor đọc tiến độ nạp (dùng Clock/Timer định kỳ 1 giây gọi 1 lần)
-// Request: GET /api/ota-progress?device_id=ML1&secret_key=123456
-app.get('/api/ota-progress', (req, res) => {
-    const { device_id, secret_key } = req.query;
-
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
-    }
-
-    const device = getOrCreateDevice(device_id);
-    return res.json({
-        status: "OK",
-        progress: device.otaProgress.progress,
-        otaStatus: device.otaProgress.status,
-        isUpdating: device.commands.co_update === 1
     });
 });
 
@@ -167,35 +140,6 @@ app.post('/api/control', (req, res) => {
 // ==========================================
 // --- API DÀNH CHO ESP8266 ---
 // ==========================================
-
-// API để ESP8266 cập nhật tiến độ nạp (0 - 100%)
-// Body: { "device_id": "ML1", "progress": 40, "status": "FLASHING" }
-app.post('/api/update-ota-progress', (req, res) => {
-    const { device_id, progress, status } = req.body;
-
-    if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id)) {
-        return res.status(401).json({ status: "ERROR", message: "Thiết bị không hợp lệ" });
-    }
-
-    const device = getOrCreateDevice(device_id);
-    device.lastSeen = Date.now();
-
-    // Cập nhật thông tin tiến độ
-    device.otaProgress = {
-        progress: typeof progress === 'number' ? progress : device.otaProgress.progress,
-        status: status || device.otaProgress.status,
-        lastUpdated: Date.now()
-    };
-
-    console.log(`[OTA PROGRESS] Device ${device_id}: ${device.otaProgress.progress}% - Trạng thái: ${device.otaProgress.status}`);
-
-    // Nếu hoàn tất (100%) hoặc gặp lỗi (chứa chữ ERROR), tắt cờ update
-    if (progress === 100 || (status && status.includes("ERROR"))) {
-        device.commands.co_update = 0;
-    }
-
-    return res.json({ status: "OK" });
-});
 
 // Endpoint cho ESP8266 tải file .bin
 app.get('/api/download-firmware/:device_id', (req, res) => {
@@ -241,11 +185,9 @@ app.post('/api/esp-sync', (req, res) => {
     // Trả lệnh về cho ESP
     res.json(device.commands);
 
-    // Reset cờ lệnh sau khi gửi (Trừ cờ co_update - cờ này sẽ do API update-ota-progress quản lý tắt)
+    // Reset cờ lệnh sau khi gửi
     for (let key in device.commands) {
-        if (key !== 'co_update') {
-            device.commands[key] = 0;
-        }
+        device.commands[key] = 0;
     }
 });
 
