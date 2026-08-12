@@ -47,6 +47,12 @@ function getOrCreateDevice(deviceId) {
                 d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A",        
                 tag: "", value: ""
             },
+            // Khởi tạo đối tượng lưu tiến độ nạp OTA
+            otaProgress: {
+                percent: 0,
+                status: "Sẵn sàng",
+                isUpdating: false
+            },
             commands: {
                 co_kiem: 0,
                 co_axit: 0,
@@ -66,9 +72,7 @@ function getOrCreateDevice(deviceId) {
 // ==========================================
 
 // API Nạp Firmware từ App Inventor (File .bin)
-// Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
-    // Lấy tham số từ Query string: ?device_id=ML1&secret_key=123456
     const { device_id, secret_key } = req.query;
 
     console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
@@ -93,9 +97,14 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
             return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
-        // Bật cờ nạp OTA
+        // Bật cờ nạp OTA và khởi tạo trạng thái tiến độ 0%
         const device = getOrCreateDevice(device_id);
         device.commands.co_update = 1;
+        device.otaProgress = {
+            percent: 0,
+            status: "Đã tải file lên server. Đang chờ thiết bị nhận cờ nạp...",
+            isUpdating: true
+        };
 
         console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
         return res.status(200).json({ 
@@ -115,13 +124,20 @@ app.post('/api/check-device', (req, res) => {
     return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
 });
 
+// App Inventor poll dữ liệu định kỳ từ API này
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
     const device = getOrCreateDevice(device_id);
-    res.json({ ...device.data, online: isOnline(device_id) });
+
+    // Bổ sung thuộc tính ota_progress vào dữ liệu trả về cho App
+    res.json({ 
+        ...device.data, 
+        ota_progress: device.otaProgress,
+        online: isOnline(device_id) 
+    });
 });
 
 app.post('/api/control', (req, res) => {
@@ -164,7 +180,18 @@ app.post('/api/esp-sync', (req, res) => {
     device.lastSeen = Date.now();
 
     if (type) {
-        if (type === "MULTI") {
+        // Xử lý gói tin cập nhật tiến độ nạp từ ESP8266
+        if (type === "OTA_PROGRESS") {
+            const percent = parseInt(req.body.progress) || 0;
+            const status = req.body.status || "";
+            
+            device.otaProgress = {
+                percent: percent,
+                status: status,
+                isUpdating: percent >= 0 && percent < 100
+            };
+            console.log(`[OTA Tiến độ - ${device_id}] ${percent}% - ${status}`);
+        } else if (type === "MULTI") {
             if (req.body.d1 && !req.body.d1.includes(':')) {
                 device.data = {
                     type: type,
