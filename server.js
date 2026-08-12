@@ -9,11 +9,20 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Thư mục lưu trữ file .bin
+// Cấu hình thư mục lưu trữ file .bin
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+        const deviceId = req.body.device_id || 'unknown';
+        cb(null, `${deviceId}.bin`);
+    }
+});
+const upload = multer({ storage: storage });
 
 const ALLOWED_DEVICES = {
     "ML1": "123456",
@@ -44,12 +53,13 @@ function getOrCreateDevice(deviceId) {
                 co_tinhkhiet: 0,
                 co_onoff: 0,
                 co_volume: 0,
-                co_update: 0
+                co_update: 0 // Cờ báo nạp code
             },
-            ota: {
-                status: "IDLE",     // IDLE, WAITING, DOWNLOADING, FLASHING, SUCCESS, ERROR
-                progress: 0,        // 0 -> 100 %
-                message: "Sẵn sàng"
+            // Khởi tạo đối tượng theo dõi tiến độ OTA
+            otaProgress: {
+                progress: 0,
+                status: "IDLE", // IDLE, DOWNLOADING, ERASING_CHIP, FLASHING, SUCCESS, ERROR
+                lastUpdated: 0
             },
             lastSeen: 0
         };
@@ -61,11 +71,11 @@ function getOrCreateDevice(deviceId) {
 // --- API DÀNH CHO APP INVENTOR ---
 // ==========================================
 
-// Upload Firmware từ App Inventor (.bin)
+// API Nạp Firmware từ App Inventor (File .bin)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
     const { device_id, secret_key } = req.query;
 
-    console.log(`[OTA] Nhận yêu cầu nạp từ App cho Device: ${device_id}`);
+    console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
@@ -79,6 +89,7 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
         return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
     }
 
+    // Lưu file vào thư mục uploads
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
     fs.writeFile(filePath, req.body, (err) => {
         if (err) {
@@ -86,16 +97,38 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
             return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
+        // Bật cờ nạp OTA và Reset trạng thái tiến độ
         const device = getOrCreateDevice(device_id);
-        device.commands.co_update = 1; // Bật cờ nạp code
-        device.ota = {
-            status: "WAITING",
+        device.commands.co_update = 1;
+        device.otaProgress = {
             progress: 0,
-            message: "Đã tải file lên Server. Chờ ESP8266 nhận lệnh..."
+            status: "STARTING",
+            lastUpdated: Date.now()
         };
 
-        console.log(`[OTA] Đã lưu file .bin cho ${device_id}. Đã bật cờ co_update=1`);
-        return res.status(200).json({ status: "OK", message: "Đã tải file thành công lên Server!" });
+        console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
+        return res.status(200).json({ 
+            status: "OK", 
+            message: "Đã tải file thành công lên Server!" 
+        });
+    });
+});
+
+// API Cho App Inventor đọc tiến độ nạp (dùng Clock/Timer định kỳ 1 giây gọi 1 lần)
+// Request: GET /api/ota-progress?device_id=ML1&secret_key=123456
+app.get('/api/ota-progress', (req, res) => {
+    const { device_id, secret_key } = req.query;
+
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+    return res.json({
+        status: "OK",
+        progress: device.otaProgress.progress,
+        otaStatus: device.otaProgress.status,
+        isUpdating: device.commands.co_update === 1
     });
 });
 
@@ -105,21 +138,17 @@ app.post('/api/check-device', (req, res) => {
     if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) return res.json({ status: "ERROR", exists: false, online: false });
     if (ALLOWED_DEVICES[device_id] !== secret_key) return res.json({ status: "ERROR", exists: true, validKey: false });
     
-    return res.json({ status: "OK", exists: true, validKey: true, online: isOnline(device_id) });
+    const onlineStatus = isOnline(device_id);
+    return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
 });
 
-// App lấy dữ liệu cảm biến & Tiến trình OTA
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
     const device = getOrCreateDevice(device_id);
-    res.json({ 
-        ...device.data, 
-        ota: device.ota, 
-        online: isOnline(device_id) 
-    });
+    res.json({ ...device.data, online: isOnline(device_id) });
 });
 
 app.post('/api/control', (req, res) => {
@@ -139,6 +168,35 @@ app.post('/api/control', (req, res) => {
 // --- API DÀNH CHO ESP8266 ---
 // ==========================================
 
+// API để ESP8266 cập nhật tiến độ nạp (0 - 100%)
+// Body: { "device_id": "ML1", "progress": 40, "status": "FLASHING" }
+app.post('/api/update-ota-progress', (req, res) => {
+    const { device_id, progress, status } = req.body;
+
+    if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id)) {
+        return res.status(401).json({ status: "ERROR", message: "Thiết bị không hợp lệ" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+    device.lastSeen = Date.now();
+
+    // Cập nhật thông tin tiến độ
+    device.otaProgress = {
+        progress: typeof progress === 'number' ? progress : device.otaProgress.progress,
+        status: status || device.otaProgress.status,
+        lastUpdated: Date.now()
+    };
+
+    console.log(`[OTA PROGRESS] Device ${device_id}: ${device.otaProgress.progress}% - Trạng thái: ${device.otaProgress.status}`);
+
+    // Nếu hoàn tất (100%) hoặc gặp lỗi (chứa chữ ERROR), tắt cờ update
+    if (progress === 100 || (status && status.includes("ERROR"))) {
+        device.commands.co_update = 0;
+    }
+
+    return res.json({ status: "OK" });
+});
+
 // Endpoint cho ESP8266 tải file .bin
 app.get('/api/download-firmware/:device_id', (req, res) => {
     const { device_id } = req.params;
@@ -151,9 +209,8 @@ app.get('/api/download-firmware/:device_id', (req, res) => {
     }
 });
 
-// ESP8266 Đồng bộ dữ liệu & Báo tiến trình OTA
 app.post('/api/esp-sync', (req, res) => {
-    const { device_id, secret_key, type, ota_status, ota_progress, ota_msg } = req.body;
+    const { device_id, secret_key, type } = req.body;
 
     if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id) || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(401).json({ status: "ERROR", message: "Xác thực không hợp lệ" });
@@ -161,15 +218,6 @@ app.post('/api/esp-sync', (req, res) => {
 
     const device = getOrCreateDevice(device_id);
     device.lastSeen = Date.now();
-
-    // Cập nhật thông tin OTA nếu có truyền lên
-    if (ota_status) {
-        device.ota = {
-            status: ota_status,
-            progress: ota_progress || 0,
-            message: ota_msg || ""
-        };
-    }
 
     if (type) {
         if (type === "MULTI") {
@@ -190,12 +238,14 @@ app.post('/api/esp-sync', (req, res) => {
         }
     }
 
-    // Trả cờ lệnh điều khiển cho ESP8266
+    // Trả lệnh về cho ESP
     res.json(device.commands);
 
-    // Reset cờ lệnh sau khi đã gửi thành công
+    // Reset cờ lệnh sau khi gửi (Trừ cờ co_update - cờ này sẽ do API update-ota-progress quản lý tắt)
     for (let key in device.commands) {
-        device.commands[key] = 0;
+        if (key !== 'co_update') {
+            device.commands[key] = 0;
+        }
     }
 });
 
