@@ -39,7 +39,7 @@ function isOnline(deviceId) {
 }
 
 function getOrCreateDevice(deviceId) {
-    if (!devices[deviceId]) {
+   if (!devices[deviceId]) {
         devices[deviceId] = {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
@@ -48,12 +48,14 @@ function getOrCreateDevice(deviceId) {
                 tag: "", value: ""
             },
             commands: {
-                co_kiem: 0,
-                co_axit: 0,
-                co_tinhkhiet: 0,
-                co_onoff: 0,
-                co_volume: 0,
-                co_update: 0 // Cờ báo nạp code
+                co_kiem: 0, co_axit: 0, co_tinhkhiet: 0,
+                co_onoff: 0, co_volume: 0, co_update: 0
+            },
+            // Trạng thái nạp code OTA
+            ota: {
+                status: "IDLE",   // IDLE, DOWNLOADING, FLASHING, SUCCESS, ERROR
+                progress: 0,      // Tiến độ 0% -> 100%
+                message: "Sẵn sàng"
             },
             lastSeen: 0
         };
@@ -67,42 +69,50 @@ function getOrCreateDevice(deviceId) {
 
 // API Nạp Firmware từ App Inventor (File .bin)
 // Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
+// --- CẬP NHẬT API UPLOAD FIRMWARE (Đặt trạng thái ban đầu) ---
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
-    // Lấy tham số từ Query string: ?device_id=ML1&secret_key=123456
     const { device_id, secret_key } = req.query;
-
-    console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
     }
-
     if (!secret_key || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
     }
-
     if (!req.body || req.body.length === 0) {
-        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
+        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng!" });
     }
 
-    // Lưu file vào thư mục uploads
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
     fs.writeFile(filePath, req.body, (err) => {
-        if (err) {
-            console.error("Lỗi ghi file:", err);
-            return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
-        }
+        if (err) return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file!" });
 
-        // Bật cờ nạp OTA
         const device = getOrCreateDevice(device_id);
         device.commands.co_update = 1;
+        
+        // Cập nhật trạng thái OTA ban đầu
+        device.ota = { status: "WAITING", progress: 0, message: "Đã tải file lên Server. Chờ ESP8266..." };
 
-        console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
-        return res.status(200).json({ 
-            status: "OK", 
-            message: "Đã tải file thành công lên Server!" 
-        });
+        return res.status(200).json({ status: "OK", message: "Đã tải file thành công lên Server!" });
     });
+});
+
+// --- BỔ SUNG API NHẬN TIẾN TRÌNH TỪ ESP8266 ---
+app.post('/api/esp-ota-status', (req, res) => {
+    const { device_id, secret_key, status, progress, message } = req.body;
+
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(401).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+    device.ota = {
+        status: status || "UNKNOWN",
+        progress: progress || 0,
+        message: message || ""
+    };
+
+    return res.json({ status: "OK" });
 });
 
 app.post('/api/check-device', (req, res) => {
@@ -121,7 +131,8 @@ app.get('/api/getdata', (req, res) => {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
     const device = getOrCreateDevice(device_id);
-    res.json({ ...device.data, online: isOnline(device_id) });
+    // Trả kèm thông tin ota
+    res.json({ ...device.data, ota: device.ota, online: isOnline(device_id) });
 });
 
 app.post('/api/control', (req, res) => {
