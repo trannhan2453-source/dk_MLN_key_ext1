@@ -9,20 +9,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Cấu hình thư mục lưu trữ file .bin
+// Thư mục lưu trữ file .bin
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadsDir),
-    filename: (req, file, cb) => {
-        const deviceId = req.body.device_id || 'unknown';
-        cb(null, `${deviceId}.bin`);
-    }
-});
-const upload = multer({ storage: storage });
 
 const ALLOWED_DEVICES = {
     "ML1": "123456",
@@ -39,7 +30,7 @@ function isOnline(deviceId) {
 }
 
 function getOrCreateDevice(deviceId) {
-   if (!devices[deviceId]) {
+    if (!devices[deviceId]) {
         devices[deviceId] = {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
@@ -48,13 +39,16 @@ function getOrCreateDevice(deviceId) {
                 tag: "", value: ""
             },
             commands: {
-                co_kiem: 0, co_axit: 0, co_tinhkhiet: 0,
-                co_onoff: 0, co_volume: 0, co_update: 0
+                co_kiem: 0,
+                co_axit: 0,
+                co_tinhkhiet: 0,
+                co_onoff: 0,
+                co_volume: 0,
+                co_update: 0
             },
-            // Trạng thái nạp code OTA
             ota: {
-                status: "IDLE",   // IDLE, DOWNLOADING, FLASHING, SUCCESS, ERROR
-                progress: 0,      // Tiến độ 0% -> 100%
+                status: "IDLE",     // IDLE, WAITING, DOWNLOADING, FLASHING, SUCCESS, ERROR
+                progress: 0,        // 0 -> 100 %
                 message: "Sẵn sàng"
             },
             lastSeen: 0
@@ -67,52 +61,42 @@ function getOrCreateDevice(deviceId) {
 // --- API DÀNH CHO APP INVENTOR ---
 // ==========================================
 
-// API Nạp Firmware từ App Inventor (File .bin)
-// Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
-// --- CẬP NHẬT API UPLOAD FIRMWARE (Đặt trạng thái ban đầu) ---
+// Upload Firmware từ App Inventor (.bin)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
     const { device_id, secret_key } = req.query;
+
+    console.log(`[OTA] Nhận yêu cầu nạp từ App cho Device: ${device_id}`);
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
     }
+
     if (!secret_key || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
     }
+
     if (!req.body || req.body.length === 0) {
-        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng!" });
+        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
     }
 
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
     fs.writeFile(filePath, req.body, (err) => {
-        if (err) return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file!" });
+        if (err) {
+            console.error("Lỗi ghi file:", err);
+            return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
+        }
 
         const device = getOrCreateDevice(device_id);
-        device.commands.co_update = 1;
-        
-        // Cập nhật trạng thái OTA ban đầu
-        device.ota = { status: "WAITING", progress: 0, message: "Đã tải file lên Server. Chờ ESP8266..." };
+        device.commands.co_update = 1; // Bật cờ nạp code
+        device.ota = {
+            status: "WAITING",
+            progress: 0,
+            message: "Đã tải file lên Server. Chờ ESP8266 nhận lệnh..."
+        };
 
+        console.log(`[OTA] Đã lưu file .bin cho ${device_id}. Đã bật cờ co_update=1`);
         return res.status(200).json({ status: "OK", message: "Đã tải file thành công lên Server!" });
     });
-});
-
-// --- BỔ SUNG API NHẬN TIẾN TRÌNH TỪ ESP8266 ---
-app.post('/api/esp-ota-status', (req, res) => {
-    const { device_id, secret_key, status, progress, message } = req.body;
-
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(401).json({ status: "ERROR", message: "Xác thực thất bại" });
-    }
-
-    const device = getOrCreateDevice(device_id);
-    device.ota = {
-        status: status || "UNKNOWN",
-        progress: progress || 0,
-        message: message || ""
-    };
-
-    return res.json({ status: "OK" });
 });
 
 app.post('/api/check-device', (req, res) => {
@@ -121,18 +105,21 @@ app.post('/api/check-device', (req, res) => {
     if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) return res.json({ status: "ERROR", exists: false, online: false });
     if (ALLOWED_DEVICES[device_id] !== secret_key) return res.json({ status: "ERROR", exists: true, validKey: false });
     
-    const onlineStatus = isOnline(device_id);
-    return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
+    return res.json({ status: "OK", exists: true, validKey: true, online: isOnline(device_id) });
 });
 
+// App lấy dữ liệu cảm biến & Tiến trình OTA
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
     const device = getOrCreateDevice(device_id);
-    // Trả kèm thông tin ota
-    res.json({ ...device.data, ota: device.ota, online: isOnline(device_id) });
+    res.json({ 
+        ...device.data, 
+        ota: device.ota, 
+        online: isOnline(device_id) 
+    });
 });
 
 app.post('/api/control', (req, res) => {
@@ -164,8 +151,9 @@ app.get('/api/download-firmware/:device_id', (req, res) => {
     }
 });
 
+// ESP8266 Đồng bộ dữ liệu & Báo tiến trình OTA
 app.post('/api/esp-sync', (req, res) => {
-    const { device_id, secret_key, type } = req.body;
+    const { device_id, secret_key, type, ota_status, ota_progress, ota_msg } = req.body;
 
     if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id) || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(401).json({ status: "ERROR", message: "Xác thực không hợp lệ" });
@@ -173,6 +161,15 @@ app.post('/api/esp-sync', (req, res) => {
 
     const device = getOrCreateDevice(device_id);
     device.lastSeen = Date.now();
+
+    // Cập nhật thông tin OTA nếu có truyền lên
+    if (ota_status) {
+        device.ota = {
+            status: ota_status,
+            progress: ota_progress || 0,
+            message: ota_msg || ""
+        };
+    }
 
     if (type) {
         if (type === "MULTI") {
@@ -193,10 +190,10 @@ app.post('/api/esp-sync', (req, res) => {
         }
     }
 
-    // Trả lệnh về cho ESP
+    // Trả cờ lệnh điều khiển cho ESP8266
     res.json(device.commands);
 
-    // Reset cờ lệnh sau khi gửi
+    // Reset cờ lệnh sau khi đã gửi thành công
     for (let key in device.commands) {
         device.commands[key] = 0;
     }
