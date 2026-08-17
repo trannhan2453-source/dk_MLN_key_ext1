@@ -53,8 +53,9 @@ function getOrCreateDevice(deviceId) {
                 co_tinhkhiet: 0,
                 co_onoff: 0,
                 co_volume: 0,
-                co_update: 0 // Cờ báo nạp code
+                co_update: 0
             },
+            settings: {},
             lastSeen: 0
         };
     }
@@ -136,7 +137,37 @@ app.post('/api/control', (req, res) => {
     }
     res.status(400).json({ status: "ERROR", message: "Lệnh không hợp lệ" });
 });
+// API nhận chuỗi tham số từ App Inventor
+app.post('/api/set-settings', (req, res) => {
+    const { device_id, secret_key, config_str } = req.body;
 
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+
+    if (!config_str || typeof config_str !== 'string') {
+        return res.status(400).json({ status: "ERROR", message: "Dữ liệu chuỗi không hợp lệ" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+
+    // Tách chuỗi "k1:100,k2:10,..." thành Object { k1: "100", k2: "10", ... }
+    const parsedSettings = {};
+    config_str.split(',').forEach(pair => {
+        const [key, value] = pair.split(':');
+        if (key && value !== undefined) {
+            parsedSettings[key.trim()] = value.trim();
+        }
+    });
+
+    device.settings = parsedSettings;
+
+    return res.json({
+        status: "OK",
+        message: "Lưu cài đặt thành công",
+        settings: device.settings
+    });
+});
 // ==========================================
 // --- API DÀNH CHO ESP8266 ---
 // ==========================================
@@ -187,7 +218,11 @@ app.post('/api/esp-sync', (req, res) => {
     }
 
     // Trả lệnh về cho ESP
-    res.json(device.commands);
+   // Gửi cả commands VÀ settings về cho ESP8266
+    res.json({
+        commands: device.commands,
+        settings: device.settings
+    });
 
     // Reset cờ lệnh sau khi gửi
     for (let key in device.commands) {
