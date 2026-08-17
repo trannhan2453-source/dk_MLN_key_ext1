@@ -44,7 +44,7 @@ function getOrCreateDevice(deviceId) {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
                 type: "NONE",
-                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A",        
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A",        
                 tag: "", value: ""
             },
             commands: {
@@ -170,7 +170,11 @@ app.post('/api/esp-sync', (req, res) => {
                     type: type,
                     d1: req.body.d1, d2: req.body.d2,
                     d3: req.body.d3, d4: req.body.d4,
-                    d5: req.body.d5, d6: req.body.d6
+                    d5: req.body.d5, d6: req.body.d6,
+                    d7: req.body.d7, d8: req.body.d8,
+                    d9: req.body.d9, d10: req.body.d10,
+                    d11: req.body.d11, d12: req.body.d12,
+                    d13: req.body.d13, d14: req.body.d14
                 };
             }
         } else {
