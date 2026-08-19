@@ -229,6 +229,8 @@ app.post('/api/esp-sync', (req, res) => {
     for (let key in device.commands) {
         device.commands[key] = 0;
     }
+    // 3. XÓA CÀI ĐẶT SAU KHI ĐÃ GỬI (Để không bị gửi lại ở lần sync tiếp theo)
+    device.settings = {};
 });
 
 const PORT = process.env.PORT || 3000;
