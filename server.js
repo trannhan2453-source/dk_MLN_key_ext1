@@ -56,6 +56,7 @@ function getOrCreateDevice(deviceId) {
                 co_update: 0
             },
             settings: {},
+            ackStatus: "", // Bổ sung biến cờ lưu trạng thái phản hồi (VD: CAPNHATOK, update fail,...)
             lastSeen: 0
         };
     }
@@ -67,9 +68,7 @@ function getOrCreateDevice(deviceId) {
 // ==========================================
 
 // API Nạp Firmware từ App Inventor (File .bin)
-// Cho phép nhận dung lượng file tới 2MB (dữ liệu thô binary từ App Inventor)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
-    // Lấy tham số từ Query string: ?device_id=ML1&secret_key=123456
     const { device_id, secret_key } = req.query;
 
     console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
@@ -86,7 +85,6 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
         return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
     }
 
-    // Lưu file vào thư mục uploads
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
     fs.writeFile(filePath, req.body, (err) => {
         if (err) {
@@ -94,7 +92,6 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
             return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
-        // Bật cờ nạp OTA
         const device = getOrCreateDevice(device_id);
         device.commands.co_update = 1;
 
@@ -116,13 +113,25 @@ app.post('/api/check-device', (req, res) => {
     return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
 });
 
+// API Lấy dữ liệu cho App Inventor (Đã tích hợp cờ ackStatus)
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
     const device = getOrCreateDevice(device_id);
-    res.json({ ...device.data, online: isOnline(device_id) });
+
+    // Chuẩn bị dữ liệu phản hồi bao gồm dữ liệu thiết bị và cờ ACK
+    const responseData = {
+        ...device.data,
+        ack: device.ackStatus, // Trả cờ ack về cho App Inventor
+        online: isOnline(device_id)
+    };
+
+    // QUAN TRỌNG: Xóa cờ ACK ngay sau khi gửi để App không bị nhận lặp lại ở lần quét sau
+    device.ackStatus = "";
+
+    res.json(responseData);
 });
 
 app.post('/api/control', (req, res) => {
@@ -137,7 +146,7 @@ app.post('/api/control', (req, res) => {
     }
     res.status(400).json({ status: "ERROR", message: "Lệnh không hợp lệ" });
 });
-// API nhận chuỗi tham số từ App Inventor
+
 app.post('/api/set-settings', (req, res) => {
     const { device_id, secret_key, config_str } = req.body;
 
@@ -151,7 +160,6 @@ app.post('/api/set-settings', (req, res) => {
 
     const device = getOrCreateDevice(device_id);
 
-    // Tách chuỗi "k1:100,k2:10,..." thành Object { k1: "100", k2: "10", ... }
     const parsedSettings = {};
     config_str.split(',').forEach(pair => {
         const [key, value] = pair.split(':');
@@ -168,11 +176,11 @@ app.post('/api/set-settings', (req, res) => {
         settings: device.settings
     });
 });
+
 // ==========================================
 // --- API DÀNH CHO ESP8266 ---
 // ==========================================
 
-// Endpoint cho ESP8266 tải file .bin
 app.get('/api/download-firmware/:device_id', (req, res) => {
     const { device_id } = req.params;
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
@@ -209,17 +217,24 @@ app.post('/api/esp-sync', (req, res) => {
                     d15: req.body.d15
                 };
             }
-        } else {
-            device.data = {
-                type: type,
-                tag: req.body.tag || "",
-                value: req.body.value || ""
-            };
+        } else if (type === "SINGLE") {
+            // Kiểm tra nếu là thông báo xác nhận từ ATmega2560
+            if (req.body.tag === "CAPNHATOK") {
+                device.ackStatus = "CAPNHATOK"; // Chốt cờ ackStatus riêng
+            } else {
+                device.data = {
+                    type: type,
+                    tag: req.body.tag || "",
+                    value: req.body.value || ""
+                };
+            }
+        } else if (type === "OTA_RESULT") {
+            // Nhận kết quả OTA từ ESP8266
+            device.ackStatus = req.body.tag || "OTA_FINISHED";
         }
     }
 
-    // Trả lệnh về cho ESP
-   // Gửi cả commands VÀ settings về cho ESP8266
+    // Trả commands và settings về cho ESP8266
     res.json({
         commands: device.commands,
         settings: device.settings
@@ -229,7 +244,7 @@ app.post('/api/esp-sync', (req, res) => {
     for (let key in device.commands) {
         device.commands[key] = 0;
     }
-    // 3. XÓA CÀI ĐẶT SAU KHI ĐÃ GỬI (Để không bị gửi lại ở lần sync tiếp theo)
+    // Xóa cài đặt sau khi gửi
     device.settings = {};
 });
 
