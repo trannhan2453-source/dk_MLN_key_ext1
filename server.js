@@ -217,7 +217,7 @@ app.post('/api/esp-sync', (req, res) => {
                     d15: req.body.d15
                 };
             }
-        } else if (type === "SINGLE") {
+        } else {
             // Kiểm tra nếu là thông báo xác nhận từ ATmega2560
             if (req.body.tag === "CAPNHATOK") {
                 device.ackStatus = "CAPNHATOK"; // Chốt cờ ackStatus riêng
@@ -228,10 +228,7 @@ app.post('/api/esp-sync', (req, res) => {
                     value: req.body.value || ""
                 };
             }
-        } else if (type === "OTA_RESULT") {
-            // Nhận kết quả OTA từ ESP8266
-            device.ackStatus = req.body.tag || "OTA_FINISHED";
-        }
+        } 
     }
 
     // Trả commands và settings về cho ESP8266
