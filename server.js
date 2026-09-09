@@ -3,12 +3,26 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const net = require('net');
-const aedes = require('aedes')();
 
-// ==========================================
-// 1. CẤU HÌNH CƠ SỞ DỮ LIỆU & THƯ MỤC
-// ==========================================
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Cấu hình thư mục lưu trữ file .bin
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir);
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+        const deviceId = req.body.device_id || 'unknown';
+        cb(null, `${deviceId}.bin`);
+    }
+});
+const upload = multer({ storage: storage });
 
 const ALLOWED_DEVICES = {
     "ML1": "123456",
@@ -16,13 +30,12 @@ const ALLOWED_DEVICES = {
     "ML3": "456"
 };
 
-const ONLINE_TIMEOUT = 30000; // 30 giây không gửi MQTT coi như offline
+const ONLINE_TIMEOUT = 30000; 
 const devices = {};
 
-// Tự động tạo thư mục uploads nếu chưa có
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+function isOnline(deviceId) {
+    if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
+    return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
 }
 
 function getOrCreateDevice(deviceId) {
@@ -31,175 +44,34 @@ function getOrCreateDevice(deviceId) {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
                 type: "NONE",
-                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", 
-                d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", 
-                d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", 
-                d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A",         
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A",         
                 tag: "", value: ""
             },
+            commands: {
+                co_kiem: 0,
+                co_axit: 0,
+                co_tinhkhiet: 0,
+                co_onoff: 0,
+                co_volume: 0,
+                co_update: 0
+            },
             settings: {},
-            ackStatus: "",
+            ackStatus: "", // Bổ sung biến cờ lưu trạng thái phản hồi (VD: CAPNHATOK, update fail,...)
             lastSeen: 0
         };
     }
     return devices[deviceId];
 }
 
-function isOnline(deviceId) {
-    if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
-    return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
-}
-
 // ==========================================
-// 2. KHỞI TẠO MQTT BROKER (CỔNG 1883)
+// --- API DÀNH CHO APP INVENTOR ---
 // ==========================================
 
-const mqttServer = net.createServer(aedes.handle);
-const MQTT_PORT = 1883;
-
-mqttServer.listen(MQTT_PORT, () => {
-    console.log(`[MQTT Broker] Đang chạy tại cổng ${MQTT_PORT}`);
-});
-
-// Xử lý dữ liệu ESP8266 gửi lên Broker
-aedes.on('publish', (packet, client) => {
-    if (!client) return; // Bỏ qua message nội bộ từ Server
-
-    const topic = packet.topic;
-    const payloadStr = packet.payload.toString();
-
-    // Định dạng Topic: devices/{device_id}/{data|ack}
-    const topicParts = topic.split('/');
-    if (topicParts[0] === 'devices' && topicParts[1]) {
-        const deviceId = topicParts[1];
-        const action = topicParts[2]; // 'data' hoặc 'ack'
-
-        if (!ALLOWED_DEVICES.hasOwnProperty(deviceId)) return;
-
-        const device = getOrCreateDevice(deviceId);
-        device.lastSeen = Date.now();
-
-        try {
-            const payload = JSON.parse(payloadStr);
-
-            if (action === 'data') {
-                if (payload.type === "MULTI") {
-                    device.data = { ...device.data, ...payload };
-                } else {
-                    device.data.type = payload.type || "SINGLE";
-                    device.data.tag = payload.tag || "";
-                    device.data.value = payload.value || "";
-                }
-            } else if (action === 'ack') {
-                if (payload.tag === "CAPNHATOK" || payload.ack) {
-                    device.ackStatus = payload.tag || payload.ack;
-                }
-            }
-        } catch (err) {
-            // Trường hợp payload gửi lên là chuỗi thô (PlainText)
-            if (action === 'ack') {
-                device.ackStatus = payloadStr;
-            }
-        }
-    }
-});
-
-// ==========================================
-// 3. KHỞI TẠO HTTP EXPRESS SERVER (CỔNG 3000)
-// ==========================================
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// --- API CHO APP INVENTOR ---
-
-// Check thiết bị online/tồn tại
-app.post('/api/check-device', (req, res) => {
-    const { device_id, secret_key } = req.body;
-    if (!device_id || !secret_key) return res.status(400).json({ status: "ERROR", message: "Thiếu thông tin" });
-    if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) return res.json({ status: "ERROR", exists: false, online: false });
-    if (ALLOWED_DEVICES[device_id] !== secret_key) return res.json({ status: "ERROR", exists: true, validKey: false });
-    
-    return res.json({ status: "OK", exists: true, validKey: true, online: isOnline(device_id) });
-});
-
-// Lấy dữ liệu cho App Inventor (Gồm data, status ACK và online)
-app.get('/api/getdata', (req, res) => {
-    const { device_id, secret_key } = req.query;
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
-    }
-
-    const device = getOrCreateDevice(device_id);
-
-    const responseData = {
-        ...device.data,
-        ack: device.ackStatus,
-        online: isOnline(device_id)
-    };
-
-    // Xóa cờ ACK sau khi App đã nhận
-    device.ackStatus = "";
-
-    return res.json(responseData);
-});
-
-// Điều khiển thiết bị -> Bắn trực tiếp qua MQTT ngay lập tức
-app.post('/api/control', (req, res) => {
-    const { device_id, secret_key, cmd } = req.body;
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
-    }
-
-    if (!cmd) return res.status(400).json({ status: "ERROR", message: "Thiếu lệnh" });
-
-    // Bắn lệnh qua MQTT Broker xuống ESP8266
-    aedes.publish({
-        topic: `devices/${device_id}/cmd`,
-        payload: JSON.stringify({ cmd: cmd })
-    });
-
-    console.log(`[CONTROL] Đã gửi lệnh '${cmd}' tới ${device_id} qua MQTT`);
-    return res.json({ status: "OK", message: `Đã gửi lệnh ${cmd}` });
-});
-
-// Cài đặt thông số -> Bắn ngay qua MQTT
-app.post('/api/set-settings', (req, res) => {
-    const { device_id, secret_key, config_str } = req.body;
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
-    }
-
-    if (!config_str || typeof config_str !== 'string') {
-        return res.status(400).json({ status: "ERROR", message: "Chuỗi cấu hình không hợp lệ" });
-    }
-
-    const parsedSettings = {};
-    config_str.split(',').forEach(pair => {
-        const [key, value] = pair.split(':');
-        if (key && value !== undefined) {
-            parsedSettings[key.trim()] = value.trim();
-        }
-    });
-
-    // Bắn chuỗi cấu hình qua MQTT
-    aedes.publish({
-        topic: `devices/${device_id}/settings`,
-        payload: JSON.stringify(parsedSettings)
-    });
-
-    return res.json({
-        status: "OK",
-        message: "Đã gửi cài đặt thành công",
-        settings: parsedSettings
-    });
-});
-
-// Upload Firmware .bin từ App Inventor
+// API Nạp Firmware từ App Inventor (File .bin)
 app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
     const { device_id, secret_key } = req.query;
+
+    console.log(`[OTA] Nhận yêu cầu nạp từ Device: ${device_id}`);
 
     if (!device_id || !ALLOWED_DEVICES[device_id]) {
         return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
@@ -210,7 +82,7 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
     }
 
     if (!req.body || req.body.length === 0) {
-        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng!" });
+        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng hoặc không hợp lệ!" });
     }
 
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
@@ -220,18 +92,94 @@ app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (re
             return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
         }
 
-        // Bắn cờ kích hoạt OTA qua MQTT
-        aedes.publish({
-            topic: `devices/${device_id}/cmd`,
-            payload: JSON.stringify({ cmd: "update" })
-        });
+        const device = getOrCreateDevice(device_id);
+        device.commands.co_update = 1;
 
-        console.log(`[OTA] Đã lưu file ${device_id}.bin và gửi lệnh update qua MQTT`);
-        return res.status(200).json({ status: "OK", message: "Đã tải file lên Server thành công!" });
+        console.log(`[OTA] File .bin đã lưu thành công! Đã bật cờ co_update=1`);
+        return res.status(200).json({ 
+            status: "OK", 
+            message: "Đã tải file thành công lên Server!" 
+        });
     });
 });
 
-// --- API DÀNH CHO ESP8266 TẢI FIRMWARE (OTA) ---
+app.post('/api/check-device', (req, res) => {
+    const { device_id, secret_key } = req.body;
+    if (!device_id || !secret_key) return res.status(400).json({ status: "ERROR", message: "Thiếu thông tin" });
+    if (!ALLOWED_DEVICES.hasOwnProperty(device_id)) return res.json({ status: "ERROR", exists: false, online: false });
+    if (ALLOWED_DEVICES[device_id] !== secret_key) return res.json({ status: "ERROR", exists: true, validKey: false });
+    
+    const onlineStatus = isOnline(device_id);
+    return res.json({ status: "OK", exists: true, validKey: true, online: onlineStatus });
+});
+
+// API Lấy dữ liệu cho App Inventor (Đã tích hợp cờ ackStatus)
+app.get('/api/getdata', (req, res) => {
+    const { device_id, secret_key } = req.query;
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+    const device = getOrCreateDevice(device_id);
+
+    // Chuẩn bị dữ liệu phản hồi bao gồm dữ liệu thiết bị và cờ ACK
+    const responseData = {
+        ...device.data,
+        ack: device.ackStatus, // Trả cờ ack về cho App Inventor
+        online: isOnline(device_id)
+    };
+
+    // QUAN TRỌNG: Xóa cờ ACK ngay sau khi gửi để App không bị nhận lặp lại ở lần quét sau
+    device.ackStatus = "";
+
+    res.json(responseData);
+});
+
+app.post('/api/control', (req, res) => {
+    const { device_id, secret_key, cmd } = req.body;
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+    const device = getOrCreateDevice(device_id);
+    if (cmd && device.commands.hasOwnProperty(`co_${cmd}`)) {
+        device.commands[`co_${cmd}`] = 1;
+        return res.json({ status: "OK", message: `Đã ghi nhận lệnh ${cmd}` });
+    }
+    res.status(400).json({ status: "ERROR", message: "Lệnh không hợp lệ" });
+});
+
+app.post('/api/set-settings', (req, res) => {
+    const { device_id, secret_key, config_str } = req.body;
+
+    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
+    }
+
+    if (!config_str || typeof config_str !== 'string') {
+        return res.status(400).json({ status: "ERROR", message: "Dữ liệu chuỗi không hợp lệ" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+
+    const parsedSettings = {};
+    config_str.split(',').forEach(pair => {
+        const [key, value] = pair.split(':');
+        if (key && value !== undefined) {
+            parsedSettings[key.trim()] = value.trim();
+        }
+    });
+
+    device.settings = parsedSettings;
+
+    return res.json({
+        status: "OK",
+        message: "Lưu cài đặt thành công",
+        settings: device.settings
+    });
+});
+
+// ==========================================
+// --- API DÀNH CHO ESP8266 ---
+// ==========================================
 
 app.get('/api/download-firmware/:device_id', (req, res) => {
     const { device_id } = req.params;
@@ -244,11 +192,60 @@ app.get('/api/download-firmware/:device_id', (req, res) => {
     }
 });
 
-// ==========================================
-// 4. CHẠY SERVER
-// ==========================================
+app.post('/api/esp-sync', (req, res) => {
+    const { device_id, secret_key, type } = req.body;
 
-const HTTP_PORT = process.env.PORT || 3000;
-app.listen(HTTP_PORT, () => {
-    console.log(`[HTTP Server] Đang chạy tại cổng ${HTTP_PORT}`);
+    if (!device_id || !ALLOWED_DEVICES.hasOwnProperty(device_id) || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(401).json({ status: "ERROR", message: "Xác thực không hợp lệ" });
+    }
+
+    const device = getOrCreateDevice(device_id);
+    device.lastSeen = Date.now();
+
+    if (type) {
+        if (type === "MULTI") {
+            if (req.body.d1 && !req.body.d1.includes(':')) {
+                device.data = {
+                    type: type,
+                    d1: req.body.d1, d2: req.body.d2,
+                    d3: req.body.d3, d4: req.body.d4,
+                    d5: req.body.d5, d6: req.body.d6,
+                    d7: req.body.d7, d8: req.body.d8,
+                    d9: req.body.d9, d10: req.body.d10,
+                    d11: req.body.d11, d12: req.body.d12,
+                    d13: req.body.d13, d14: req.body.d14,
+                    d15: req.body.d15, d16: req.body.d16,
+                    d17: req.body.d17, d18: req.body.d18,
+                    d19: req.body.d19, d20: req.body.d20
+                };
+            }
+        } else {
+            // Kiểm tra nếu là thông báo xác nhận từ ATmega2560
+            if (req.body.tag === "CAPNHATOK") {
+                device.ackStatus = "CAPNHATOK"; // Chốt cờ ackStatus riêng
+            } else {
+                device.data = {
+                    type: type,
+                    tag: req.body.tag || "",
+                    value: req.body.value || ""
+                };
+            }
+        } 
+    }
+
+    // Trả commands và settings về cho ESP8266
+    res.json({
+        commands: device.commands,
+        settings: device.settings
+    });
+
+    // Reset cờ lệnh sau khi gửi
+    for (let key in device.commands) {
+        device.commands[key] = 0;
+    }
+    // Xóa cài đặt sau khi gửi
+    device.settings = {};
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
