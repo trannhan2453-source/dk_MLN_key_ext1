@@ -3,29 +3,12 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const mqtt = require('mqtt'); // Bổ sung thư viện MQTT
+const net = require('net');
+const aedes = require('aedes')();
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// --- CẤU HÌNH MQTT BROKER (Phải trùng với ESP8266) ---
-const MQTT_BROKER = "mqtt://broker.emqx.io:1883"; // Hoặc server MQTT riêng
-const mqttClient = mqtt.connect(MQTT_BROKER);
-
-mqttClient.on('connect', () => {
-    console.log('[MQTT] Kết nối thành công tới MQTT Broker!');
-    // Đăng ký nhận dữ liệu từ TẤT CẢ các thiết bị dạng device/+/data và device/+/ota_result
-    mqttClient.subscribe('device/+/data');
-    mqttClient.subscribe('device/+/ota_result');
-});
-
-// Cấu hình thư mục lưu trữ file .bin
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir);
-}
+// ==========================================
+// 1. CẤU HÌNH CƠ SỞ DỮ LIỆU & THƯ MỤC
+// ==========================================
 
 const ALLOWED_DEVICES = {
     "ML1": "123456",
@@ -33,12 +16,13 @@ const ALLOWED_DEVICES = {
     "ML3": "456"
 };
 
-const ONLINE_TIMEOUT = 45000; // Tăng lên 45s vì heartbeat ESP8266 là 30s
+const ONLINE_TIMEOUT = 30000; // 30 giây không gửi MQTT coi như offline
 const devices = {};
 
-function isOnline(deviceId) {
-    if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
-    return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
+// Tự động tạo thư mục uploads nếu chưa có
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 function getOrCreateDevice(deviceId) {
@@ -47,9 +31,13 @@ function getOrCreateDevice(deviceId) {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
                 type: "NONE",
-                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A",         
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", 
+                d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", 
+                d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", 
+                d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A",         
                 tag: "", value: ""
             },
+            settings: {},
             ackStatus: "",
             lastSeen: 0
         };
@@ -57,83 +45,77 @@ function getOrCreateDevice(deviceId) {
     return devices[deviceId];
 }
 
+function isOnline(deviceId) {
+    if (!devices[deviceId] || !devices[deviceId].lastSeen) return false;
+    return (Date.now() - devices[deviceId].lastSeen) < ONLINE_TIMEOUT;
+}
+
 // ==========================================
-// --- XỬ LÝ LẮNG NGHE DỮ LIỆU TỪ MQTT BROKER ---
+// 2. KHỞI TẠO MQTT BROKER (CỔNG 1883)
 // ==========================================
-mqttClient.on('message', (topic, message) => {
-    try {
-        const topicParts = topic.split('/');
+
+const mqttServer = net.createServer(aedes.handle);
+const MQTT_PORT = 1883;
+
+mqttServer.listen(MQTT_PORT, () => {
+    console.log(`[MQTT Broker] Đang chạy tại cổng ${MQTT_PORT}`);
+});
+
+// Xử lý dữ liệu ESP8266 gửi lên Broker
+aedes.on('publish', (packet, client) => {
+    if (!client) return; // Bỏ qua message nội bộ từ Server
+
+    const topic = packet.topic;
+    const payloadStr = packet.payload.toString();
+
+    // Định dạng Topic: devices/{device_id}/{data|ack}
+    const topicParts = topic.split('/');
+    if (topicParts[0] === 'devices' && topicParts[1]) {
         const deviceId = topicParts[1];
-        const messageType = topicParts[2]; // 'data' hoặc 'ota_result'
+        const action = topicParts[2]; // 'data' hoặc 'ack'
 
-        if (!ALLOWED_DEVICES[deviceId]) return;
+        if (!ALLOWED_DEVICES.hasOwnProperty(deviceId)) return;
 
-        const payload = JSON.parse(message.toString());
         const device = getOrCreateDevice(deviceId);
         device.lastSeen = Date.now();
 
-        if (messageType === 'data') {
-            if (payload.type === "MULTI") {
-                device.data = {
-                    type: payload.type,
-                    d1: payload.d1, d2: payload.d2, d3: payload.d3, d4: payload.d4,
-                    d5: payload.d5, d6: payload.d6, d7: payload.d7, d8: payload.d8,
-                    d9: payload.d9, d10: payload.d10, d11: payload.d11, d12: payload.d12,
-                    d13: payload.d13, d14: payload.d14, d15: payload.d15, d16: payload.d16,
-                    d17: payload.d17, d18: payload.d18, d19: payload.d19, d20: payload.d20
-                };
-            } else if (payload.type === "SINGLE") {
-                if (payload.tag === "CAPNHATOK") {
-                    device.ackStatus = "CAPNHATOK";
+        try {
+            const payload = JSON.parse(payloadStr);
+
+            if (action === 'data') {
+                if (payload.type === "MULTI") {
+                    device.data = { ...device.data, ...payload };
                 } else {
-                    device.data = {
-                        type: payload.type,
-                        tag: payload.tag || "",
-                        value: payload.value || ""
-                    };
+                    device.data.type = payload.type || "SINGLE";
+                    device.data.tag = payload.tag || "";
+                    device.data.value = payload.value || "";
+                }
+            } else if (action === 'ack') {
+                if (payload.tag === "CAPNHATOK" || payload.ack) {
+                    device.ackStatus = payload.tag || payload.ack;
                 }
             }
-        } else if (messageType === 'ota_result') {
-            device.ackStatus = payload.tag || "OTA_FINISHED";
+        } catch (err) {
+            // Trường hợp payload gửi lên là chuỗi thô (PlainText)
+            if (action === 'ack') {
+                device.ackStatus = payloadStr;
+            }
         }
-    } catch (err) {
-        console.error("[MQTT Error] Lỗi parse JSON từ MQTT:", err.message);
     }
 });
 
 // ==========================================
-// --- API DÀNH CHO APP INVENTOR ---
+// 3. KHỞI TẠO HTTP EXPRESS SERVER (CỔNG 3000)
 // ==========================================
 
-// API Nạp Firmware từ App Inventor (File .bin)
-app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
-    const { device_id, secret_key } = req.query;
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-    if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
-        return res.status(403).json({ status: "ERROR", message: "Xác thực không hợp lệ!" });
-    }
+// --- API CHO APP INVENTOR ---
 
-    if (!req.body || req.body.length === 0) {
-        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng!" });
-    }
-
-    const filePath = path.join(uploadsDir, `${device_id}.bin`);
-    fs.writeFile(filePath, req.body, (err) => {
-        if (err) {
-            return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file Server!" });
-        }
-
-        // Bắn cờ co_update = 1 trực tiếp qua MQTT để ESP8266 kích hoạt OTA ngay lập tức
-        const commandTopic = `device/${device_id}/command`;
-        const cmdPayload = JSON.stringify({ commands: { co_update: 1 } });
-        
-        mqttClient.publish(commandTopic, cmdPayload);
-        console.log(`[OTA] Đã lưu .bin & Bắn MQTT co_update=1 tới device: ${device_id}`);
-
-        return res.status(200).json({ status: "OK", message: "Tải file thành công, đang gửi lệnh nạp code!" });
-    });
-});
-
+// Check thiết bị online/tồn tại
 app.post('/api/check-device', (req, res) => {
     const { device_id, secret_key } = req.body;
     if (!device_id || !secret_key) return res.status(400).json({ status: "ERROR", message: "Thiếu thông tin" });
@@ -143,12 +125,13 @@ app.post('/api/check-device', (req, res) => {
     return res.json({ status: "OK", exists: true, validKey: true, online: isOnline(device_id) });
 });
 
-// API Lấy dữ liệu cho App Inventor
+// Lấy dữ liệu cho App Inventor (Gồm data, status ACK và online)
 app.get('/api/getdata', (req, res) => {
     const { device_id, secret_key } = req.query;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
+
     const device = getOrCreateDevice(device_id);
 
     const responseData = {
@@ -157,39 +140,40 @@ app.get('/api/getdata', (req, res) => {
         online: isOnline(device_id)
     };
 
-    device.ackStatus = ""; // Clear ack ngay sau khi app đọc
-    res.json(responseData);
+    // Xóa cờ ACK sau khi App đã nhận
+    device.ackStatus = "";
+
+    return res.json(responseData);
 });
 
-// API Gửi lệnh điều khiển từ App Inventor -> Đẩy thẳng qua MQTT
+// Điều khiển thiết bị -> Bắn trực tiếp qua MQTT ngay lập tức
 app.post('/api/control', (req, res) => {
     const { device_id, secret_key, cmd } = req.body;
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
 
-    if (cmd) {
-        const commandTopic = `device/${device_id}/command`;
-        const cmdObj = { commands: {} };
-        cmdObj.commands[`co_${cmd}`] = 1;
+    if (!cmd) return res.status(400).json({ status: "ERROR", message: "Thiếu lệnh" });
 
-        // Push trực tiếp xuống MQTT Broker (Realtime < 10ms)
-        mqttClient.publish(commandTopic, JSON.stringify(cmdObj));
-        return res.json({ status: "OK", message: `Đã gửi lệnh ${cmd} qua MQTT` });
-    }
-    res.status(400).json({ status: "ERROR", message: "Lệnh không hợp lệ" });
+    // Bắn lệnh qua MQTT Broker xuống ESP8266
+    aedes.publish({
+        topic: `devices/${device_id}/cmd`,
+        payload: JSON.stringify({ cmd: cmd })
+    });
+
+    console.log(`[CONTROL] Đã gửi lệnh '${cmd}' tới ${device_id} qua MQTT`);
+    return res.json({ status: "OK", message: `Đã gửi lệnh ${cmd}` });
 });
 
-// API Gửi Cài đặt từ App Inventor -> Đẩy thẳng qua MQTT
+// Cài đặt thông số -> Bắn ngay qua MQTT
 app.post('/api/set-settings', (req, res) => {
     const { device_id, secret_key, config_str } = req.body;
-
     if (!device_id || !ALLOWED_DEVICES[device_id] || ALLOWED_DEVICES[device_id] !== secret_key) {
         return res.status(403).json({ status: "ERROR", message: "Xác thực thất bại" });
     }
 
     if (!config_str || typeof config_str !== 'string') {
-        return res.status(400).json({ status: "ERROR", message: "Dữ liệu chuỗi không hợp lệ" });
+        return res.status(400).json({ status: "ERROR", message: "Chuỗi cấu hình không hợp lệ" });
     }
 
     const parsedSettings = {};
@@ -200,20 +184,55 @@ app.post('/api/set-settings', (req, res) => {
         }
     });
 
-    const commandTopic = `device/${device_id}/command`;
-    const payload = JSON.stringify({ settings: parsedSettings });
-
-    // Push trực tiếp xuống MQTT Broker
-    mqttClient.publish(commandTopic, payload);
+    // Bắn chuỗi cấu hình qua MQTT
+    aedes.publish({
+        topic: `devices/${device_id}/settings`,
+        payload: JSON.stringify(parsedSettings)
+    });
 
     return res.json({
         status: "OK",
-        message: "Đã gửi cài đặt qua MQTT thành công",
+        message: "Đã gửi cài đặt thành công",
         settings: parsedSettings
     });
 });
 
-// API cho ESP8266 tải file Firmware .bin (Giữ nguyên)
+// Upload Firmware .bin từ App Inventor
+app.post('/api/upload-firmware', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
+    const { device_id, secret_key } = req.query;
+
+    if (!device_id || !ALLOWED_DEVICES[device_id]) {
+        return res.status(404).json({ status: "ERROR", message: "Thiết bị không tồn tại!" });
+    }
+
+    if (!secret_key || ALLOWED_DEVICES[device_id] !== secret_key) {
+        return res.status(403).json({ status: "ERROR", message: "Mã PIN không chính xác!" });
+    }
+
+    if (!req.body || req.body.length === 0) {
+        return res.status(400).json({ status: "ERROR", message: "File .bin rỗng!" });
+    }
+
+    const filePath = path.join(uploadsDir, `${device_id}.bin`);
+    fs.writeFile(filePath, req.body, (err) => {
+        if (err) {
+            console.error("Lỗi ghi file:", err);
+            return res.status(500).json({ status: "ERROR", message: "Lỗi ghi file trên Server!" });
+        }
+
+        // Bắn cờ kích hoạt OTA qua MQTT
+        aedes.publish({
+            topic: `devices/${device_id}/cmd`,
+            payload: JSON.stringify({ cmd: "update" })
+        });
+
+        console.log(`[OTA] Đã lưu file ${device_id}.bin và gửi lệnh update qua MQTT`);
+        return res.status(200).json({ status: "OK", message: "Đã tải file lên Server thành công!" });
+    });
+});
+
+// --- API DÀNH CHO ESP8266 TẢI FIRMWARE (OTA) ---
+
 app.get('/api/download-firmware/:device_id', (req, res) => {
     const { device_id } = req.params;
     const filePath = path.join(uploadsDir, `${device_id}.bin`);
@@ -225,5 +244,11 @@ app.get('/api/download-firmware/:device_id', (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server MQTT Proxy running on port ${PORT}`));
+// ==========================================
+// 4. CHẠY SERVER
+// ==========================================
+
+const HTTP_PORT = process.env.PORT || 3000;
+app.listen(HTTP_PORT, () => {
+    console.log(`[HTTP Server] Đang chạy tại cổng ${HTTP_PORT}`);
+});
