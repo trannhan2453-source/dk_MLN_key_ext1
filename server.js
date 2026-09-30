@@ -44,7 +44,7 @@ function getOrCreateDevice(deviceId) {
             secretKey: ALLOWED_DEVICES[deviceId] || "",
             data: {
                 type: "NONE",
-                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A", d21: "N/A", d22: "N/A", d23: "N/A", d24: "N/A",        
+                d1: "N/A", d2: "N/A", d3: "N/A", d4: "N/A", d5: "N/A", d6: "N/A", d7: "N/A", d8: "N/A", d9: "N/A", d10: "N/A", d11: "N/A", d12: "N/A", d13: "N/A", d14: "N/A", d15: "N/A", d16: "N/A", d17: "N/A", d18: "N/A", d19: "N/A", d20: "N/A", d21: "N/A", d22: "N/A", d23: "N/A", d24: "N/A", d25: "N/A",       
                 tag: "", value: ""
             },
             commands: {
@@ -218,7 +218,7 @@ app.post('/api/esp-sync', (req, res) => {
                     d17: req.body.d17, d18: req.body.d18,
                     d19: req.body.d19, d20: req.body.d20,
                     d21: req.body.d21, d22: req.body.d22,
-                    d23: req.body.d23, d24: req.body.d24
+                    d23: req.body.d23, d24: req.body.d24, d25: req.body.d25
                 };
             }
         } else {
