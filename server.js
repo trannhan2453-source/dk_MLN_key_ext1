@@ -223,7 +223,7 @@ app.post('/api/esp-sync', (req, res) => {
             }
         } else {
             // Kiểm tra nếu là thông báo xác nhận từ ATmega2560
-            if (req.body.tag === "CAPNHATOK") {
+            if (req.body.tag === "C") {
                 device.ackStatus = "CAPNHATOK"; // Chốt cờ ackStatus riêng
             } else {
                 device.data = {
